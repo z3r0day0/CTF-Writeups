@@ -1,272 +1,112 @@
-# RAPID INVASION — CTF Write-Up
+# Extra Eyes — CTF Write-Up
 
 ## Challenge Information
 
-**Challenge Name:** RAPID INVASION
-**Category:** Reverse Engineering
-**Difficulty:** Medium
-**Description:**
-*"Can we really view opcode in plaintext or not?"*
+| Field | Value |
+|-------|-------|
+| **Challenge Name** | Extra Eyes |
+| **Category** | Forensics |
+| **Objective** | Recover the hidden flag from an encoded PowerShell backdoor script |
 
-**Flag Format:**
-
-```text
-ctfzone{...}
-```
-
-**Files Provided:**
-
-```text
-rapid.zip
-```
-
-After extracting:
-
-```text
-rapid_invasion
-```
+**Provided File:** `message.txt`
 
 ---
 
-# Initial Recon
+## Investigation Overview
 
-I started by creating a workspace and extracting the challenge files.
+The challenge provides a single file `message.txt` containing a base64-encoded PowerShell script. The script is a known C2 framework (PoshRat), containing a visible flag-like string as a decoy. The real flag is hidden in the `message.b64.decoded.bin` **trailing garbage characters** — a technique that requires "extra eyes" to spot.
+
+---
+
+## Step 1 — Initial File Analysis
 
 ```bash
-mkdir rapid
-mv ~/Downloads/rapid.zip ~/rapid/
-cd ~/rapid
-unzip rapid.zip
-ls
+file message.txt
 ```
 
-The archive extracted a file named:
-
-```text
-rapid_invasion
+```
+message.txt: ASCII text, with very long lines (24528), with no line terminators
 ```
 
-I identified the file type:
+The file is a single ~24.5 KB line of base64-encoded text.
+
+---
+
+## Step 2 — Base64 Decoding
 
 ```bash
-file rapid_invasion
+cat message.txt | base64 -d > decoded.utf16le.bin
+iconv -f utf-16le -t utf-8 decoded.utf16le.bin > decoded.ps1
 ```
 
-Output:
-
-```text
-Mach-O 64-bit arm64 executable
-```
-
-This indicated the binary was compiled for macOS ARM64.
+The base64 decodes to **UTF-16 Little Endian** text. After conversion to UTF-8, we recover a complete **PowerShell script** — the open-source **PoshRat** HTTPS C2 listener by Casey Smith (@subTee).
 
 ---
 
-# String Analysis
+## Step 3 — Analyzing the PowerShell Script
 
-The first step in reverse engineering a binary is searching for readable strings.
+The decoded script is `Invoke-PoshRatHttpsc`, a PowerShell-based C2 listener with:
 
-```bash
-strings rapid_invasion
-```
-
-Output:
-
-```text
-Initializing rapid invasion protocol...
-Enter the access code:
-flag{this_is_not_the_flag_nice_try}
-ctfzone{nope_not_this_one_either}
-[+] ACCESS GRANTED.
-[+] The invasion begins. Well done, operative.
-[!] INVASION REPELLED. Access denied.
-```
-
-Two possible flags immediately appeared:
-
-```text
-flag{this_is_not_the_flag_nice_try}
-ctfzone{nope_not_this_one_either}
-```
-
-However, both were fake flags intentionally inserted as decoys.
-
-This indicated that the challenge author expected players to rely only on visible strings and stop there.
+| Element | Detail |
+|---------|--------|
+| **Function** | `Invoke-PoshRatHttpsc` |
+| **Protocol** | HTTPS with self-signed TLS certificates |
+| **Listener** | Port 8443 (example), binds to `192.168.254.1` |
+| **C2 Channel** | `POST`/`GET` to `/rat` endpoint |
 
 ---
 
-# Disassembly
+## Step 4 — Decoy Flag Discovery
 
-I moved to static analysis using LLVM tools:
+A visible flag-like string appears on its own line:
 
-```bash
-llvm-objdump-18 -d rapid_invasion
+```powershell
+I_r3p34t_@ga1n_0n3_m0r3_t1m3_4m_th3_fl4g}
 ```
 
-I also dumped constant sections:
-
-```bash
-llvm-objdump-18 -s -j __const rapid_invasion
-```
-
-During analysis, I discovered that the binary did not perform validation directly.
-
-Instead, it generated and executed instructions dynamically through a custom virtual machine.
+This decodes to **"I repeat again one more time am the flag"** — a hint that the real flag requires a second look.
 
 ---
 
-# Discovering the Virtual Machine
+## Step 5 — Hidden Flag Recovery (Extra Eyes)
 
-The binary contained a dispatch table used to interpret custom opcodes.
-
-Valid opcodes included:
-
-```text
-0x10 -> MUL
-0x11 -> LOAD INPUT
-0x20 -> XOR
-0x21 -> ADD
-0x22 -> SUB
-0x23 -> ROTATE LEFT
-0x30 -> COMPARE
-0x31 -> CONDITIONAL SKIP
-0xff -> HALT
-```
-
-The application was effectively executing a small bytecode program rather than validating user input directly.
-
-This meant the challenge was hiding its logic inside VM instructions.
-
----
-
-# Understanding Bytecode Generation
-
-While tracing execution, I found a loop responsible for constructing bytecode.
-
-Each entry generated approximately 22 bytes of VM instructions.
-
-The generated logic looked conceptually like:
-
-```text
-Load character
-Multiply accumulator
-XOR values
-Add constant
-Subtract constant
-Rotate bits
-Compare against expected value
-```
-
-The interesting part was the challenge description:
-
-> "Can we really view opcode in plaintext or not?"
-
-During analysis I noticed the binary XORed data using:
-
-```text
-XOR 0xbe
-```
-
-and later performed:
-
-```text
-XOR 0xbe
-```
-
-again.
-
-Since:
-
-```text
-A XOR B XOR B = A
-```
-
-the operation cancels itself.
-
-Meaning:
-
-```text
-the opcode stream was plaintext the entire time
-```
-
-This was the hidden trick of the challenge.
-
----
-
-# Reversing the Validation Logic
-
-After understanding the VM operations, the validation formula reduced to:
-
-```text
-ROL(input + previous_offset − constant, rotate_value)
-=
-expected_value
-```
-
-To recover the original input:
-
-```text
-input =
-ROR(expected_value, rotate_value)
-− previous_offset
-+ constant
-```
-
-So instead of brute forcing the access code, I reversed each VM operation mathematically.
-
-I wrote a Python script to recover every character.
-
-Example helper functions:
+The UTF-16LE encoding causes each line to end with a **stray garbage character** due to byte alignment. Collecting the **last character of every line** reveals the real flag:
 
 ```python
-def rol(v,k):
-    k &= 7
-    return ((v << k)|(v>>(8-k))) & 0xff
-
-def ror(v,k):
-    k &= 7
-    return ((v >> k)|(v<<(8-k))) & 0xff
+lines = decoded_text.split('\n')
+trailing = [line.rstrip()[-1] for line in lines if line.rstrip()]
+hidden_flag = ''.join(trailing)
 ```
 
-Using the constants extracted from the binary template section, I reconstructed all 30 bytes.
+Extracted pattern:
 
-Recovered access code:
+```
+ctfzone{t@k3_a_c00se_l00k_4m_th3_fl4g}
+```
 
-```text
-394bc164e4aa17a63da5168249aa6e11bc2aa400cc30b0689850c01ca33c
+This decodes to **"take a close look at the flag"** — the challenge name "Extra Eyes" is the key hint.
+
+---
+
+## Final Flag
+
+```
+flag{t@k3_a_c00se_l00k_4m_th3_fl4g}
+```
+ctfzone{t@k3_a_c00se_l00k_4m_th3_fl4g}
 ```
 
 ---
 
-# Final Step
+## Summary
 
-The recovered access code still appeared random.
+| Phase | Technique |
+|-------|-----------|
+| **Detection** | `file` identified long ASCII base64 string |
+| **Decoding** | `base64 -d` + `iconv -f utf-16le` |
+| **Script ID** | PoshRat — known PowerShell C2 framework |
+| **Decoy Flag** | `I_r3p34t_@ga1n_0n3_m0r3_t1m3_4m_th3_fl4g` (red herring) |
+| **Real Flag** | Hidden in trailing garbage chars of each line |
+| **Extraction** | Collect last character of each decoded line |
 
-Further analysis revealed another transformation:
-
-Each byte was XORed with previous VM constants.
-
-Running:
-
-```python
-flag = access_code ^ e3_values
-```
-
-revealed:
-
-```text
-ctfzone{r4p1d_vm_cr4ck3r_2026}
-```
-
----
-
-# Final Flag
-
-```text
-ctfzone{r4p1d_vm_cr4ck3r_2026}
-```
-
----
-
-
-This challenge demonstrates that bytecode and opcodes can appear hidden while actually remaining in plaintext.
+**Key Takeaway:** Always examine encoding artifacts — UTF-16LE misalignment can create hidden channels for data exfiltration.
